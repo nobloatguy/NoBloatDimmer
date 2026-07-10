@@ -31,6 +31,9 @@ public partial class MainWindow : Window
     private bool _brightenHotkeyRegistered;
     private bool _emergencyClearHotkeyRegistered;
     private bool _showingCustomizePanel;
+    private bool _isFullScreen;
+    private bool _birthdayModeEnabled;
+    private BlackoutCycleStage _blackoutCycleStage;
 
     private static readonly Dictionary<string, ThemeDefinition> Themes =
         new(StringComparer.OrdinalIgnoreCase)
@@ -78,6 +81,7 @@ public partial class MainWindow : Window
 
         Loaded += MainWindow_Loaded;
         Closing += MainWindow_Closing;
+        PreviewKeyDown += MainWindow_PreviewKeyDown;
     }
 
     public ObservableCollection<DisplayState> Displays { get; } = new();
@@ -87,6 +91,7 @@ public partial class MainWindow : Window
         RegisterShortcuts();
         ApplyTheme(_settings.ThemeName, save: false);
         ApplyWindowSize(_settings.WindowSizePreset, save: false);
+        ApplyResetKey(_settings.ResetKey, save: false);
         RefreshDisplays();
         CreateTrayIcon();
         ShowDisplaysPanel();
@@ -94,19 +99,104 @@ public partial class MainWindow : Window
         SystemEvents.DisplaySettingsChanged += SystemEvents_DisplaySettingsChanged;
     }
 
+    private void ShellContent_SizeChanged(object sender, SizeChangedEventArgs e)
+    {
+        UpdateShellClip();
+    }
+
+    private void UpdateShellClip()
+    {
+        var radius = _isFullScreen ? 0 : 23;
+        var width = Math.Max(0, ShellContent.ActualWidth);
+        var height = Math.Max(0, ShellContent.ActualHeight);
+
+        ShellContent.Clip = new Media.RectangleGeometry(
+            new Rect(0, 0, width, height),
+            radius,
+            radius);
+    }
+
     private void TitleBar_MouseLeftButtonDown(
         object sender,
         MouseButtonEventArgs e)
     {
+        if (e.ChangedButton != MouseButton.Left)
+        {
+            return;
+        }
+
+        if (e.ClickCount == 2)
+        {
+            ToggleFullScreen();
+            e.Handled = true;
+            return;
+        }
+
         if (e.ButtonState == MouseButtonState.Pressed)
         {
-            DragMove();
+            if (_isFullScreen)
+            {
+                ExitFullScreen();
+            }
+
+            try
+            {
+                DragMove();
+            }
+            catch (InvalidOperationException)
+            {
+                // The mouse button was released before Windows began the drag.
+            }
         }
     }
 
     private void Window_Minimize_Click(object sender, RoutedEventArgs e)
     {
         WindowState = WindowState.Minimized;
+    }
+
+    private void Window_FullScreen_Click(object sender, RoutedEventArgs e)
+    {
+        ToggleFullScreen();
+    }
+
+    private void ToggleFullScreen()
+    {
+        if (_isFullScreen)
+        {
+            ExitFullScreen();
+            return;
+        }
+
+        _isFullScreen = true;
+        MaxWidth = double.PositiveInfinity;
+        MaxHeight = double.PositiveInfinity;
+        ResizeMode = ResizeMode.NoResize;
+        ShellBorder.Margin = new Thickness(0);
+        ShellBorder.CornerRadius = new CornerRadius(0);
+        WindowState = WindowState.Maximized;
+        FullScreenIcon.Text = "❐";
+        FullScreenButton.ToolTip = "Restore window";
+        UpdateShellClip();
+    }
+
+    private void ExitFullScreen(bool restorePreset = true)
+    {
+        _isFullScreen = false;
+        WindowState = WindowState.Normal;
+        MaxWidth = double.PositiveInfinity;
+        MaxHeight = double.PositiveInfinity;
+        ResizeMode = ResizeMode.CanResize;
+        ShellBorder.Margin = new Thickness(30);
+        ShellBorder.CornerRadius = new CornerRadius(24);
+        FullScreenIcon.Text = "□";
+        FullScreenButton.ToolTip = "Full screen";
+        UpdateShellClip();
+
+        if (restorePreset)
+        {
+            ApplyWindowSize(_settings.WindowSizePreset, save: false);
+        }
     }
 
     private void Window_Close_Click(object sender, RoutedEventArgs e)
@@ -202,6 +292,8 @@ public partial class MainWindow : Window
 
         _settings.DisplayDimming[display.DeviceName] = display.DimPercent;
 
+        ResetBlackoutCycle();
+
         SettingsService.Save(_settings);
         _overlayManager.Apply(display);
 
@@ -246,6 +338,7 @@ public partial class MainWindow : Window
             return;
         }
 
+        ResetBlackoutCycle();
         SetAllDisplays(requestedValue);
     }
 
@@ -283,6 +376,8 @@ public partial class MainWindow : Window
 
         SetAllDisplays(0);
 
+        ResetBlackoutCycle();
+
         UpdateStatus("Brightness restored.");
     }
 
@@ -299,9 +394,50 @@ public partial class MainWindow : Window
             return;
         }
 
-        SetAllDisplays(100);
+        var currentValue = (int)Math.Round(AllDisplaysSlider.Value);
 
-        UpdateStatus("Blackout active. Press Alt + Shift + 0 to restore.");
+        if (_blackoutCycleStage == BlackoutCycleStage.Blackout ||
+            currentValue >= 100)
+        {
+            SetAllDisplays(50);
+            _blackoutCycleStage = BlackoutCycleStage.Half;
+            UpdateBlackoutButton();
+            UpdateStatus("Blackout reduced to 50%. Press Enter again to restore.");
+            return;
+        }
+
+        if (_blackoutCycleStage == BlackoutCycleStage.Half &&
+            currentValue == 50)
+        {
+            RestoreBrightness();
+            return;
+        }
+
+        SetAllDisplays(100);
+        _blackoutCycleStage = BlackoutCycleStage.Blackout;
+        UpdateBlackoutButton();
+        UpdateStatus("Blackout active. Press Enter to reduce it to 50%.");
+    }
+
+    private void ResetBlackoutCycle()
+    {
+        _blackoutCycleStage = BlackoutCycleStage.Ready;
+        UpdateBlackoutButton();
+    }
+
+    private void UpdateBlackoutButton()
+    {
+        if (BlackoutButton is null)
+        {
+            return;
+        }
+
+        BlackoutButton.Content = _blackoutCycleStage switch
+        {
+            BlackoutCycleStage.Blackout => "Reduce to 50%",
+            BlackoutCycleStage.Half => "Restore 0%",
+            _ => "Blackout"
+        };
     }
 
     private void DisplaysTab_Click(object sender, RoutedEventArgs e)
@@ -334,6 +470,97 @@ public partial class MainWindow : Window
         UpdateNavigationVisuals();
     }
 
+    private void MainWindow_PreviewKeyDown(
+        object sender,
+        System.Windows.Input.KeyEventArgs e)
+    {
+        if (Keyboard.Modifiers != ModifierKeys.None ||
+            e.OriginalSource is System.Windows.Controls.TextBox ||
+            Keyboard.FocusedElement is System.Windows.Controls.TextBox)
+        {
+            return;
+        }
+
+        if (Keyboard.FocusedElement is System.Windows.Controls.Button button &&
+            button.Tag is string tag &&
+            IsResetKeyName(tag))
+        {
+            return;
+        }
+
+        var resetKey = ResolveResetKey(_settings.ResetKey);
+
+        if (e.Key != resetKey)
+        {
+            return;
+        }
+
+        RestoreBrightness();
+        e.Handled = true;
+    }
+
+    private void ResetKeyButton_Click(object sender, RoutedEventArgs e)
+    {
+        if (sender is not System.Windows.Controls.Button button ||
+            button.Tag is not string resetKeyName)
+        {
+            return;
+        }
+
+        ApplyResetKey(resetKeyName, save: true);
+    }
+
+    private void ApplyResetKey(string? requestedResetKey, bool save)
+    {
+        var resetKeyName = NormalizeResetKeyName(requestedResetKey);
+        _settings.ResetKey = resetKeyName;
+
+        if (save)
+        {
+            SettingsService.Save(_settings);
+        }
+
+        ResetKeyStatusText.Text =
+            $"{resetKeyName} restores brightness while this window is active";
+
+        UpdateResetKeyButtonVisuals(resetKeyName);
+    }
+
+    private static string NormalizeResetKeyName(string? requestedResetKey)
+    {
+        if (string.Equals(requestedResetKey, "R", StringComparison.OrdinalIgnoreCase))
+        {
+            return "R";
+        }
+
+        if (string.Equals(
+                requestedResetKey,
+                "Backspace",
+                StringComparison.OrdinalIgnoreCase))
+        {
+            return "Backspace";
+        }
+
+        return "Enter";
+    }
+
+    private static bool IsResetKeyName(string value)
+    {
+        return string.Equals(value, "Enter", StringComparison.OrdinalIgnoreCase) ||
+               string.Equals(value, "R", StringComparison.OrdinalIgnoreCase) ||
+               string.Equals(value, "Backspace", StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static Key ResolveResetKey(string? resetKeyName)
+    {
+        return NormalizeResetKeyName(resetKeyName) switch
+        {
+            "R" => Key.R,
+            "Backspace" => Key.Back,
+            _ => Key.Return
+        };
+    }
+
     private void ThemeButton_Click(object sender, RoutedEventArgs e)
     {
         if (sender is not System.Windows.Controls.Button button ||
@@ -342,7 +569,118 @@ public partial class MainWindow : Window
             return;
         }
 
+        if (_birthdayModeEnabled)
+        {
+            DisableBirthdayMode();
+        }
+
         ApplyTheme(themeName, save: true);
+    }
+
+    private void BirthdayModeButton_Click(object sender, RoutedEventArgs e)
+    {
+        if (_birthdayModeEnabled)
+        {
+            DisableBirthdayMode();
+            return;
+        }
+
+        EnableBirthdayMode();
+    }
+
+    private void EnableBirthdayMode()
+    {
+        _birthdayModeEnabled = true;
+
+        Resources["Accent"] = CreateRainbowBrush(1.0);
+        Resources["AccentSoft"] = CreateRainbowBrush(0.20);
+        Resources["AccentBorder"] = CreateRainbowBrush(0.58);
+
+        BirthdayModeButton.Opacity = 0.95;
+        BirthdayModeButton.ToolTip = "Birthday Mode is on. Click again to turn it off.";
+        ThemeStatusText.Text = "J bae bae Birthday Mode active";
+
+        UpdateNavigationVisuals();
+    }
+
+    private void DisableBirthdayMode()
+    {
+        _birthdayModeEnabled = false;
+        BirthdayModeButton.Opacity = 0.28;
+        BirthdayModeButton.ToolTip = "You found it";
+
+        ApplyTheme(_settings.ThemeName, save: false);
+    }
+
+    private static Media.LinearGradientBrush CreateRainbowBrush(
+        double colorWeight)
+    {
+        var colors = new[]
+        {
+            Media.Colors.Red,
+            Media.Colors.Orange,
+            Media.Colors.Yellow,
+            Media.Colors.Lime,
+            Media.Colors.Cyan,
+            Media.Colors.DeepSkyBlue,
+            Media.Colors.Violet,
+            Media.Colors.Red
+        };
+
+        var offsets = new[]
+        {
+            0.0,
+            0.15,
+            0.30,
+            0.45,
+            0.60,
+            0.75,
+            0.90,
+            1.0
+        };
+
+        var brush = new Media.LinearGradientBrush
+        {
+            StartPoint = new System.Windows.Point(0, 0.5),
+            EndPoint = new System.Windows.Point(1, 0.5),
+            SpreadMethod = Media.GradientSpreadMethod.Reflect
+        };
+
+        for (var index = 0; index < colors.Length; index++)
+        {
+            brush.GradientStops.Add(new Media.GradientStop(
+                MixWithBackground(colors[index], colorWeight),
+                offsets[index]));
+        }
+
+        var rotation = new Media.RotateTransform(0, 0.5, 0.5);
+        brush.RelativeTransform = rotation;
+
+        rotation.BeginAnimation(
+            Media.RotateTransform.AngleProperty,
+            new System.Windows.Media.Animation.DoubleAnimation
+            {
+                From = 0,
+                To = 360,
+                Duration = new System.Windows.Duration(TimeSpan.FromSeconds(6)),
+                RepeatBehavior =
+                    System.Windows.Media.Animation.RepeatBehavior.Forever
+            });
+
+        return brush;
+    }
+
+    private static Media.Color MixWithBackground(
+        Media.Color color,
+        double colorWeight)
+    {
+        var background = Media.Color.FromRgb(14, 20, 27);
+        var weight = Math.Clamp(colorWeight, 0, 1);
+
+        return Media.Color.FromRgb(
+            (byte)Math.Round(background.R + ((color.R - background.R) * weight)),
+            (byte)Math.Round(background.G + ((color.G - background.G) * weight)),
+            (byte)Math.Round(background.B + ((color.B - background.B) * weight)));
     }
 
     private void WindowSizeButton_Click(object sender, RoutedEventArgs e)
@@ -374,11 +712,17 @@ public partial class MainWindow : Window
         ThemeStatusText.Text = $"{theme.Name} accent selected";
 
         UpdateThemeButtonVisuals(theme);
+        UpdateResetKeyButtonVisuals(_settings.ResetKey);
         UpdateNavigationVisuals();
     }
 
     private void ApplyWindowSize(string? requestedSize, bool save)
     {
+        if (_isFullScreen)
+        {
+            ExitFullScreen(restorePreset: false);
+        }
+
         var preset = ResolveWindowSize(requestedSize);
 
         Width = preset.Width;
@@ -478,8 +822,61 @@ public partial class MainWindow : Window
         }
     }
 
+    private void UpdateResetKeyButtonVisuals(string? selectedResetKey)
+    {
+        var normalizedResetKey = NormalizeResetKeyName(selectedResetKey);
+        var theme = ResolveTheme(_settings.ThemeName);
+
+        var buttons = new[]
+        {
+            (Name: "Enter", Button: EnterResetKeyButton),
+            (Name: "R", Button: RResetKeyButton),
+            (Name: "Backspace", Button: BackspaceResetKeyButton)
+        };
+
+        foreach (var item in buttons)
+        {
+            var selected = string.Equals(
+                item.Name,
+                normalizedResetKey,
+                StringComparison.OrdinalIgnoreCase);
+
+            item.Button.Background = new Media.SolidColorBrush(
+                selected
+                    ? theme.AccentSoft
+                    : Media.Color.FromRgb(26, 34, 45));
+
+            item.Button.BorderBrush = new Media.SolidColorBrush(
+                selected
+                    ? theme.AccentBorder
+                    : Media.Color.FromRgb(52, 65, 84));
+        }
+    }
+
     private void UpdateNavigationVisuals()
     {
+        if (_birthdayModeEnabled &&
+            Resources["Accent"] is Media.Brush birthdayAccent &&
+            Resources["AccentSoft"] is Media.Brush birthdaySoft &&
+            Resources["AccentBorder"] is Media.Brush birthdayBorder)
+        {
+            SetBirthdayNavigationButtonState(
+                DisplaysNavButton,
+                !_showingCustomizePanel,
+                birthdayAccent,
+                birthdaySoft,
+                birthdayBorder);
+
+            SetBirthdayNavigationButtonState(
+                CustomizeNavButton,
+                _showingCustomizePanel,
+                birthdayAccent,
+                birthdaySoft,
+                birthdayBorder);
+
+            return;
+        }
+
         var theme = ResolveTheme(_settings.ThemeName);
 
         SetNavigationButtonState(
@@ -506,6 +903,26 @@ public partial class MainWindow : Window
 
         button.Foreground = new Media.SolidColorBrush(
             active ? theme.Accent : Media.Color.FromRgb(140, 152, 167));
+    }
+
+    private static void SetBirthdayNavigationButtonState(
+        System.Windows.Controls.Button button,
+        bool active,
+        Media.Brush accent,
+        Media.Brush soft,
+        Media.Brush border)
+    {
+        button.Background = active
+            ? soft
+            : Media.Brushes.Transparent;
+
+        button.BorderBrush = active
+            ? border
+            : Media.Brushes.Transparent;
+
+        button.Foreground = active
+            ? accent
+            : new Media.SolidColorBrush(Media.Color.FromRgb(140, 152, 167));
     }
 
     private void ResetDisplayNames_Click(object sender, RoutedEventArgs e)
@@ -676,7 +1093,9 @@ public partial class MainWindow : Window
     private void ShowWindowFromTray()
     {
         Show();
-        WindowState = WindowState.Normal;
+        WindowState = _isFullScreen
+            ? WindowState.Maximized
+            : WindowState.Normal;
         Activate();
     }
 
@@ -743,4 +1162,11 @@ public partial class MainWindow : Window
         string Name,
         double Width,
         double Height);
+
+    private enum BlackoutCycleStage
+    {
+        Ready,
+        Blackout,
+        Half
+    }
 }

@@ -14,4 +14,6 @@ public sealed class DimmerSettings
     public string ThemeName { get; set; } = "Lime";
 
     public string WindowSizePreset { get; set; } = "Standard";
+
+    public string ResetKey { get; set; } = "Enter";
 }

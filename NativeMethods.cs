@@ -52,3 +52,4 @@ internal static class NativeMethods
         SetWindowLongPtr(handle, GwlExStyle, (nint)updated);
     }
 }
+

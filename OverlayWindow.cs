@@ -75,3 +75,4 @@ internal sealed class OverlayWindow : Window
         }
     }
 }
+

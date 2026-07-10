@@ -33,3 +33,4 @@ internal sealed class OverlayManager
         _overlays.Clear();
     }
 }
+
